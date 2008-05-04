@@ -1,0 +1,149 @@
+require "rake"
+require "rake/rdoctask"
+
+GENERATOR_ROOT = File.expand_path(File.dirname(__FILE__))
+MERB_CORE_ROOT = File.join(GENERATOR_ROOT, 'merb_releases', 'merb-core')
+MERB_CORE_RELEASES = Dir.glob("#{MERB_CORE_ROOT}/*")
+MERB_MORE_ROOT = File.join(GENERATOR_ROOT, 'merb_releases', 'merb-more')
+MERB_MORE_RELEASES = Dir.glob("#{MERB_MORE_ROOT}/*")
+MERB_PLUGINS_ROOT = File.join(GENERATOR_ROOT, 'merb_releases', 'merb-plugins')
+MERB_PLUGINS_RELEASES = Dir.glob("#{MERB_PLUGINS_ROOT}/*")
+WEB_ROOT = '/data/merbivore.com'
+DOC_DIRECTORY = File.join(WEB_ROOT, 'documentation')
+RDOC_GENERATORS_DIR = File.join($:.detect { |path| path =~ /\/ruby\/1\.\d$/ }, 'rdoc', 'generators')
+
+desc 'Rebuild RDOCs for all releases, create template symlinks, create doc directory off of web server root, symlink the doc directories to be web accessible.'
+task :default => [:rdoc_all, :create_template_symlinks, :create_doc_directory, :create_doc_symlinks]
+
+def generate_rdoc(path, merb_core_release = true)
+  if merb_core_release
+    puts "Removing #{path}/doc"
+    `rm -rf #{path}/doc`
+
+    puts "Changing directory to #{path}"
+    Dir.chdir(path)
+    puts "Generating RDOC for #{path}"
+    `rdoc --fmt merb -t 'merb-core #{File.basename(path)}' -m #{path}/README`
+  else
+    sub_gem_paths = Dir.glob("#{path}/merb*")
+    sub_gem_paths.each do |sub_gem_path|
+      puts "Removing #{sub_gem_path}/doc"
+      `rm -rf #{sub_gem_path}/doc`
+
+      puts "Changing directory to #{sub_gem_path}"
+      Dir.chdir(sub_gem_path)
+      puts "Generating RDOC for #{sub_gem_path}"
+      `rdoc --fmt merb -t '#{File.basename(sub_gem_path)} #{File.basename(path)}' -m #{sub_gem_path}/README`
+    end
+  end
+end
+
+# ===================================================================================================
+# = Doesn't document all files (i.e. Merb::Controller is nowhere to be found in the generated docs) =
+# ===================================================================================================
+desc 'BROKEN: Generate merged RDOCs. Pass version=x.x.x for a specific version (defaults to head)'
+task :rdoc_merged do
+  version = ENV['version'] ||= 'head'
+  output_dir = "/data/merbivore.com/documentation/merged/#{version}"
+  `rm -rf #{output_dir}`
+  included_files = Dir.glob("merb_releases/*/#{version}/**/lib/**/*.rb")
+  included_files << readme = "/home/merb/rdoc_generator/merb_releases/merb-core/#{version}/README"
+
+  puts "Generating Merged RDOCs for #{version}"
+  rdoc_command = "rdoc --fmt merb -t 'Merb Merged #{version}' -m #{readme} --op #{output_dir} #{included_files.join(' ')}"
+  puts rdoc_command
+  `#{rdoc_command}`
+end
+
+
+desc 'Pull git repos to head'
+task :pull_repos do
+  original_dir = Dir.pwd
+  
+  puts 'Changing directory to merb-core'
+  Dir.chdir(File.join(MERB_CORE_ROOT, 'head'))
+  puts 'Updating merb-core to head'
+  `git pull`
+
+  puts 'Changing directory to merb-more'
+  Dir.chdir(File.join(MERB_MORE_ROOT, 'head'))
+  puts 'Updating merb-more to head'
+  `git pull`
+  
+  puts 'Changing directory to merb-plugins'
+  Dir.chdir(File.join(MERB_PLUGINS_ROOT, 'head'))
+  puts 'Updating merb-plugins to head'
+  `git pull`
+  
+  # Avoid side effects from changing directories
+  Dir.chdir(original_dir)
+end
+
+desc 'Pull git repos to head and regenerate RDOCs'
+task :rdoc_heads  => :pull_repos do
+  generate_rdoc(File.join(MERB_CORE_ROOT, 'head'))
+  generate_rdoc(File.join(MERB_MORE_ROOT, 'head'), false)
+  generate_rdoc(File.join(MERB_PLUGINS_ROOT, 'head'), false)
+end
+
+desc 'Regenerate RDOCs for all releases'
+task :rdoc_all => :pull_repos do
+  MERB_CORE_RELEASES.each { |release_path| generate_rdoc(release_path) }
+  (MERB_MORE_RELEASES + MERB_PLUGINS_RELEASES).each { |release_path| generate_rdoc(release_path, false) }
+end
+
+desc 'Symlink to the merb RDOC generator from the RDOC generators directory'
+task :create_template_symlinks do
+  generator = File.join(RDOC_GENERATORS_DIR, 'merb_generator.rb')
+  unless File.exist?(generator)
+    puts 'Symlinking RDOC generator'
+    `sudo ln -s #{GENERATOR_ROOT}/rdoc_template/merb_generator.rb #{generator}`
+  end
+  
+  template_directory = File.join(RDOC_GENERATORS_DIR, 'template', 'merb')
+  unless File.exist?(template_directory)
+    puts 'Symlinking RDOC template'
+    `sudo ln -s #{GENERATOR_ROOT}/rdoc_template/merb #{template_directory}`
+  end
+end
+
+desc 'Create the documentation directory in the web root'
+task :create_doc_directory do
+  unless File.exist?(DOC_DIRECTORY)
+    puts "#{DOC_DIRECTORY} does not exist; creating it"
+    File.mkdir(DOC_DIRECTORY)
+  end
+end
+
+desc 'Symlink the doc dirs of the merb-core and merb-more docs to the web dir'
+task :create_doc_symlinks => :create_doc_directory do
+  MERB_CORE_RELEASES.each do |release_path|
+    release_symlink = File.join(DOC_DIRECTORY, 'merb-core', File.basename(release_path))
+    unless File.exist?(release_symlink)
+      puts "Symlinking #{release_path} to #{release_path}/doc"
+      `ln -s #{release_path}/doc #{release_symlink}`
+    end
+  end
+  
+  (MERB_MORE_RELEASES + MERB_PLUGINS_RELEASES).each do |release_path|
+    if release_path.match(/merb-plugins/)
+      release_symlink_parent_dir = File.join(DOC_DIRECTORY, 'merb-plugins', File.basename(release_path))
+    else
+       release_symlink_parent_dir = File.join(DOC_DIRECTORY, 'merb-more', File.basename(release_path))
+    end
+    
+    unless File.exist?(release_symlink_parent_dir)
+      puts "Creating #{release_symlink_parent_dir} directory"
+      `mkdir -p #{release_symlink_parent_dir}`
+    end
+    
+    sub_gem_paths = Dir.glob("#{release_path}/merb*")
+    sub_gem_paths.each do |sub_gem_path|
+      sub_gem_symlink = File.join(release_symlink_parent_dir, File.basename(sub_gem_path))
+      unless File.exist?(sub_gem_symlink)
+        puts "Symlinking #{sub_gem_symlink} to #{sub_gem_symlink}/doc"
+        `ln -s #{sub_gem_path}/doc #{sub_gem_symlink}`
+      end
+    end
+  end
+end
